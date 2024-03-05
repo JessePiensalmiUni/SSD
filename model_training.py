@@ -1,61 +1,78 @@
 import torch
 from torch.utils.data import DataLoader
-from SSD_model import SSDMobileNetV2
-from preprocessor import FaceDataset, collate_fn
-import torch.optim as optim
-import utils as ut
+from torchvision import transforms
+from torchvision.models.detection import ssdlite320_mobilenet_v3_large
+from torchvision.models.detection.ssdlite import MobileNet_V3_Large_Weights
+from custom_dataset import CustomDataset
+from is_this_loss import classification_loss,bbox_regression_loss
+from SSD_model import SSD
 
-input_shape = (3, 300, 300)
-num_classes = 1  # Number of classes, in this case, 1 for face detection
-num_anchor_boxes = 4  # Number of anchor boxes per spatial location
-num_epochs = 10
+#print(torch.cuda.is_available())
+#print(torch.version.cuda)
+#cuda_id = torch.cuda.current_device()
+#print(torch.cuda.current_device())
+       
+#print(torch.cuda.get_device_name(cuda_id))
 
-# Define your dataset and data loader
-train_dir = 'D:/SSD_pytorch/datasets/WIDER_train/images'
-ground_truth_file_train = 'D:/SSD_pytorch/datasets/wider_face_train_bbx_gt.txt'
+output_size = 2
+pretrained = False
 
-face_dataset = FaceDataset(root_dir=train_dir, ground_truth_file=ground_truth_file_train, transform=None)
-data_loader = DataLoader(face_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
+# Set up the paths and parameters
+data_folder = "datasets/WIDER_train\images"
+txt_file = "datasets/wider_face_train_bbx_gt.txt"
 
-# Define the device (GPU if available, otherwise CPU)
+# Set up transformations
+transform = transforms.Compose([
+    transforms.Resize((320, 320)),
+    transforms.ToTensor(),
+])
+
+def custom_collate_fn(batch):
+    images = [item[0] for item in batch]
+    targets = [item[1] for item in batch]
+    return images, targets
+
+# Create a custom dataset
+custom_dataset = CustomDataset(txt_file=txt_file, transform=transform)
+
+# Create a data loader
+batch_size = 1
+train_loader = DataLoader(custom_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
+# Set up the model
+#model = ssdlite320_mobilenet_v3_large(weights=None, num_classes=output_size, weights_backbone=MobileNet_V3_Large_Weights)
+model  = SSD(num_classes=output_size)
+# Set up optimizer and loss function
+optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+
+# Training loop
+num_epochs = 5 # Adjust as needed
+print(torch.cuda.is_available())
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Initialize your model and move it to the appropriate device
-model = SSDMobileNetV2(input_shape, num_classes).to(device)
-
-# Define your optimizer and learning rate
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# Custom loss function for bounding box detection
-loss_function = ut.CustomLoss()
-
+print(device)
+model.to(device)
+print("starting training")
 for epoch in range(num_epochs):
-    for images, targets in data_loader:
-        images = images.to(device)
-        # Iterate over each target dictionary in the list
-        for target_dict in targets:
-            # Filter out invalid bounding boxes (width or height is 0)
-            valid_boxes = [box for box in target_dict if box['w'] > 0 and box['h'] > 0]
-            if not valid_boxes:
-                continue  # Skip if there are no valid boxes
-            
-            num_boxes = len(valid_boxes)
-            boxes = torch.tensor([[box['x'], box['y'], box['w'], box['h']] for box in valid_boxes]).to(device)
-            
-            # Generate target labels tensor
-            target_labels = torch.zeros(num_boxes, num_anchor_boxes, num_classes).to(device)
+    model.train()
+    for inputs, targets in train_loader:
+        inputs = [img.to(device) for img in inputs]
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]  # Move targets to the same device    
 
-            # Forward pass
-            confidences, locations = model(images)
+        optimizer.zero_grad()
+        # Forward pass
+        outputs = model(inputs)
 
-            # Compute your loss
-            loss = loss_function(confidences, locations, boxes, target_labels)
+        # Compute the losses
+        bbox_loss = bbox_regression_loss(outputs['bbox'], targets)
+        classification_loss_ad = classification_loss(outputs['classification'], targets)
+        
+        # Total loss
+        loss = bbox_loss + classification_loss_ad
 
-            # Backpropagation
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        # Backward pass and optimization
+        loss.backward()
+        optimizer.step()
 
-    print(f"Epoch {epoch+1} completed")
+    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item()}")
 
-print("Training finished")
+# Save the trained model
+torch.save(model.state_dict(), 'trained_model.pth')
